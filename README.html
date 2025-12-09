@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Med-Enter: PL/SQL Medicine Batch Entry and Validation System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+        
+        .header {
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            color: #667eea;
+            font-size: 2.2em;
+            margin-bottom: 15px;
+        }
+        
+        .student-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .student-info p {
+            margin: 5px 0;
+            color: #555;
+        }
+        
+        .student-info strong {
+            color: #333;
+        }
+        
+        h2 {
+            color: #667eea;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 1.8em;
+            border-bottom: 2px solid #e9ecef;
+            padding-bottom: 10px;
+        }
+        
+        h3 {
+            color: #764ba2;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-size: 1.3em;
+        }
+        
+        p {
+            margin-bottom: 15px;
+            text-align: justify;
+        }
+        
+        ul {
+            margin-left: 30px;
+            margin-bottom: 15px;
+        }
+        
+        ul li {
+            margin-bottom: 10px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        table thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        table th, table td {
+            padding: 12px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }
+        
+        table tbody tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        
+        table tbody tr:hover {
+            background-color: #e9ecef;
+        }
+        
+        .code-block {
+            background: #282c34;
+            color: #abb2bf;
+            padding: 20px;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            line-height: 1.5;
+        }
+        
+        .code-block .keyword {
+            color: #c678dd;
+            font-weight: bold;
+        }
+        
+        .code-block .string {
+            color: #98c379;
+        }
+        
+        .code-block .number {
+            color: #d19a66;
+        }
+        
+        .code-block .comment {
+            color: #5c6370;
+            font-style: italic;
+        }
+        
+        .feature-list {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .feature-list li {
+            margin-bottom: 12px;
+        }
+        
+        .feature-list strong {
+            color: #667eea;
+        }
+        
+        .section {
+            margin-bottom: 40px;
+        }
+        
+        .highlight {
+            background: #fff3cd;
+            padding: 15px;
+            border-left: 4px solid #ffc107;
+            border-radius: 3px;
+            margin: 15px 0;
+        }
+        
+        .sql-table {
+            font-size: 0.95em;
+        }
+        
+        .sql-table th {
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Med-Enter: PL/SQL Medicine Batch Entry and Validation System</h1>
+        </div>
+        
+        <div class="student-info">
+            <p><strong>Name:</strong> DUSHIME Sangwa Bertrand</p>
+            <p><strong>Student ID:</strong> 27971</p>
+            <p><strong>Course:</strong> PL/SQL Database</p>
+            <p><strong>Date:</strong> 9th December 2025</p>
+        </div>
+        
+        <div class="section">
+            <h2>Project Overview</h2>
+            <p>This project implements a secure and efficient PL/SQL system for managing pharmaceutical inventory. The core functionality is to validate and record new medicine batches, immediately rejecting any that are expired or near-expiry (less than 60 days remaining). It centralizes complex logic into a single atomic transaction to prevent human error and ensure data integrity.</p>
+        </div>
+        
+        <div class="section">
+            <h2>Key Features</h2>
+            <div class="feature-list">
+                <ul>
+                    <li><strong>Atomic Batch Entry:</strong> A single PL/SQL Stored Procedure (ADD_NEW_MEDICINE_BATCH) handles input validation, batch insertion, stock update, and alert logging.</li>
+                    <li><strong>Critical Safety Check:</strong> Automatic rejection of batches that are already expired or expire in less than 60 days to ensure patient safety.</li>
+                    <li><strong>Real-Time Stock Management:</strong> Automatically updates the total quantity (total_quantity) in the MEDICINES table upon successful batch entry.</li>
+                    <li><strong>Automated Alerts:</strong> Generates and logs LOW_STOCK alerts when the total quantity falls below the defined reorder_level.</li>
+                    <li><strong>Comprehensive Audit Trail:</strong> Logs all successful batch entries, rejections, and stock warnings in the ALERTS_LOG table.</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Database Schema</h2>
+            <p>The system uses three core tables:</p>
+            
+            <table class="sql-table">
+                <thead>
+                    <tr>
+                        <th>Table Name</th>
+                        <th>Primary Purpose</th>
+                        <th>Key Fields</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>MEDICINES</strong></td>
+                        <td>Master reference for drugs and reorder settings.</td>
+                        <td>med_id (PK), med_name, reorder_level</td>
+                    </tr>
+                    <tr>
+                        <td><strong>BATCH_INVENTORY</strong></td>
+                        <td>Detailed tracking of stock by individual batch and expiry date.</td>
+                        <td>batch_id (PK), med_id (FK), batch_number, quantity_in_stock, expiry_date</td>
+                    </tr>
+                    <tr>
+                        <td><strong>ALERTS_LOG</strong></td>
+                        <td>Record for all system-generated warnings and events.</td>
+                        <td>alert_id (PK), med_id (FK), alert_type, message, alert_date</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+            <div class="highlight">
+                <strong>Relationships:</strong> Both BATCH_INVENTORY and ALERTS_LOG have a One-to-Many (1:M) relationship with the MEDICINES table.
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Installation and Setup</h2>
+            
+            <h3>Prerequisites</h3>
+            <ul>
+                <li>Oracle Database (or Oracle Express Edition)</li>
+                <li>SQL Developer or SQL*Plus</li>
+            </ul>
+            
+            <h3>Steps</h3>
+            <ol>
+                <li><strong>Create Tables:</strong> Execute the DDL script to create the MEDICINES, BATCH_INVENTORY, and ALERTS_LOG tables (The DDL script should be included in your repository).</li>
+                <li><strong>Create PL/SQL Objects:</strong> Execute the scripts for:
+                    <ul>
+                        <li>The main procedure: ADD_NEW_MEDICINE_BATCH</li>
+                        <li>Helper functions/procedures: check_expiry_date, log_alert, etc.</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+        
+        <div class="section">
+            <h2>Usage</h2>
+            <p>The primary interaction with the system is through the main stored procedure.</p>
+            
+            <h3>1. Adding a New Medicine Batch</h3>
+            <p>This procedure attempts to insert a new batch, performing validation and safety checks before committing the transaction.</p>
+            
+            <div class="code-block">
+<span class="keyword">DECLARE</span>
+  v_status  <span class="keyword">VARCHAR2</span>(<span class="number">50</span>);
+  v_message <span class="keyword">VARCHAR2</span>(<span class="number">500</span>);
+<span class="keyword">BEGIN</span>
+  ADD_NEW_MEDICINE_BATCH(
+    p_med_id       => <span class="number">1</span>,                           <span class="comment">-- Medicine ID (e.g., Paracetamol)</span>
+    p_quantity     => <span class="number">500</span>,                         <span class="comment">-- Quantity to add</span>
+    p_batch_number => <span class="string">'BATCH001'</span>,                  <span class="comment">-- Supplier's batch ID</span>
+    p_expiry_date  => ADD_MONTHS(SYSDATE, <span class="number">12</span>),    <span class="comment">-- Must be > 60 days away</span>
+    p_status       => v_status,                    <span class="comment">-- Output status</span>
+    p_message      => v_message                    <span class="comment">-- Output message</span>
+  );
+  
+  <span class="comment">-- Output the result:</span>
+  DBMS_OUTPUT.PUT_LINE(<span class="string">'Status: '</span> || v_status);
+  DBMS_OUTPUT.PUT_LINE(<span class="string">'Message: '</span> || v_message);
+<span class="keyword">END</span>;
+/
+            </div>
+            
+            <h3>2. Viewing Inventory Status</h3>
+            <p>You can view the overall health of the inventory using simple SELECT statements or helper procedures:</p>
+            
+            <table class="sql-table">
+                <thead>
+                    <tr>
+                        <th>Description</th>
+                        <th>SQL/PL-SQL Command</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>View All Batches</td>
+                        <td><code>SELECT * FROM BATCH_INVENTORY ORDER BY expiry_date;</code></td>
+                    </tr>
+                    <tr>
+                        <td>View Medicine Batches</td>
+                        <td><code>EXEC view_medicine_batches(1);</code></td>
+                    </tr>
+                    <tr>
+                        <td>Check Alert History</td>
+                        <td><code>SELECT * FROM ALERTS_LOG ORDER BY alert_date DESC;</code></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
