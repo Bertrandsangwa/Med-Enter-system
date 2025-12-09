@@ -1,0 +1,444 @@
+-- Drop tables if they exist (for clean installation)
+DROP TABLE ALERTS_LOG CASCADE CONSTRAINTS;
+DROP TABLE BATCH_INVENTORY CASCADE CONSTRAINTS;
+DROP TABLE MEDICINES CASCADE CONSTRAINTS;
+
+-- Drop sequences if they exist
+DROP SEQUENCE med_seq;
+DROP SEQUENCE batch_seq;
+DROP SEQUENCE alert_seq;
+
+-- Create sequences for primary keys
+CREATE SEQUENCE med_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE batch_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE alert_seq START WITH 1 INCREMENT BY 1;
+
+-- MEDICINES Table: Master reference for drug names and reorder settings
+CREATE TABLE MEDICINES (
+    med_id NUMBER PRIMARY KEY,
+    med_name VARCHAR2(100) NOT NULL,
+    dosage VARCHAR2(50),
+    reorder_level NUMBER DEFAULT 100,
+    total_quantity NUMBER DEFAULT 0,
+    created_date DATE DEFAULT SYSDATE,
+    CONSTRAINT chk_reorder_level CHECK (reorder_level >= 0),
+    CONSTRAINT chk_total_quantity CHECK (total_quantity >= 0)
+);
+
+-- BATCH_INVENTORY Table: Detailed tracking of stock by batch and expiry date
+CREATE TABLE BATCH_INVENTORY (
+    batch_id NUMBER PRIMARY KEY,
+    med_id NUMBER NOT NULL,
+    batch_number VARCHAR2(50) NOT NULL,
+    quantity_in_stock NUMBER NOT NULL,
+    expiry_date DATE NOT NULL,
+    entry_date DATE DEFAULT SYSDATE,
+    CONSTRAINT fk_batch_med FOREIGN KEY (med_id) REFERENCES MEDICINES(med_id),
+    CONSTRAINT chk_quantity CHECK (quantity_in_stock >= 0),
+    CONSTRAINT uk_batch_number UNIQUE (batch_number)
+);
+
+-- ALERTS_LOG Table: Record for all system-generated warnings
+CREATE TABLE ALERTS_LOG (
+    alert_id NUMBER PRIMARY KEY,
+    med_id NUMBER,
+    alert_type VARCHAR2(50) NOT NULL,
+    message VARCHAR2(500) NOT NULL,
+    alert_date DATE DEFAULT SYSDATE,
+    CONSTRAINT fk_alert_med FOREIGN KEY (med_id) REFERENCES MEDICINES(med_id)
+);
+
+-- ============================================================================
+-- STEP 2: CREATE CUSTOM EXCEPTIONS AND HELPER FUNCTIONS
+-- ============================================================================
+
+-- Package for custom exceptions and constants
+CREATE OR REPLACE PACKAGE med_constants AS
+    -- Custom exception codes
+    expired_medicine_exception EXCEPTION;
+    PRAGMA EXCEPTION_INIT(expired_medicine_exception, -20001);
+    
+    near_expiry_exception EXCEPTION;
+    PRAGMA EXCEPTION_INIT(near_expiry_exception, -20002);
+    
+    invalid_quantity_exception EXCEPTION;
+    PRAGMA EXCEPTION_INIT(invalid_quantity_exception, -20003);
+    
+    missing_data_exception EXCEPTION;
+    PRAGMA EXCEPTION_INIT(missing_data_exception, -20004);
+    
+    medicine_not_found_exception EXCEPTION;
+    PRAGMA EXCEPTION_INIT(medicine_not_found_exception, -20005);
+    
+    -- Constants
+    MIN_EXPIRY_DAYS CONSTANT NUMBER := 60;
+END med_constants;
+/
+
+-- ============================================================================
+-- STEP 3: CREATE VALIDATION FUNCTIONS
+-- ============================================================================
+
+-- Function to check if medicine is expired or near expiry
+CREATE OR REPLACE FUNCTION check_expiry_date(
+    p_expiry_date IN DATE
+) RETURN VARCHAR2 IS
+    v_days_until_expiry NUMBER;
+BEGIN
+    v_days_until_expiry := p_expiry_date - SYSDATE;
+    
+    IF v_days_until_expiry < 0 THEN
+        RETURN 'EXPIRED';
+    ELSIF v_days_until_expiry < med_constants.MIN_EXPIRY_DAYS THEN
+        RETURN 'NEAR_EXPIRY';
+    ELSE
+        RETURN 'VALID';
+    END IF;
+END check_expiry_date;
+/
+
+-- Function to get medicine name by ID
+CREATE OR REPLACE FUNCTION get_medicine_name(
+    p_med_id IN NUMBER
+) RETURN VARCHAR2 IS
+    v_med_name VARCHAR2(100);
+BEGIN
+    SELECT med_name INTO v_med_name
+    FROM MEDICINES
+    WHERE med_id = p_med_id;
+    
+    RETURN v_med_name;
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RETURN NULL;
+END get_medicine_name;
+/
+
+-- ============================================================================
+-- STEP 4: CREATE PROCEDURE TO LOG ALERTS
+-- ============================================================================
+
+CREATE OR REPLACE PROCEDURE log_alert(
+    p_med_id IN NUMBER,
+    p_alert_type IN VARCHAR2,
+    p_message IN VARCHAR2
+) IS
+    PRAGMA AUTONOMOUS_TRANSACTION;
+BEGIN
+    INSERT INTO ALERTS_LOG (alert_id, med_id, alert_type, message, alert_date)
+    VALUES (alert_seq.NEXTVAL, p_med_id, p_alert_type, p_message, SYSDATE);
+    
+    COMMIT;
+END log_alert;
+/
+
+-- ============================================================================
+-- STEP 5: CREATE MAIN STORED PROCEDURE - ADD_NEW_MEDICINE_BATCH
+-- ============================================================================
+
+CREATE OR REPLACE PROCEDURE ADD_NEW_MEDICINE_BATCH(
+    p_med_id IN NUMBER,
+    p_quantity IN NUMBER,
+    p_batch_number IN VARCHAR2,
+    p_expiry_date IN DATE,
+    p_status OUT VARCHAR2,
+    p_message OUT VARCHAR2
+) IS
+    v_expiry_status VARCHAR2(20);
+    v_med_name VARCHAR2(100);
+    v_current_total NUMBER;
+    v_reorder_level NUMBER;
+    v_days_until_expiry NUMBER;
+    v_medicine_exists NUMBER;
+BEGIN
+    -- Initialize output parameters
+    p_status := 'PENDING';
+    p_message := 'Processing...';
+    
+    -- ========================================================================
+    -- VALIDATION 1: Check for missing or invalid data
+    -- ========================================================================
+    IF p_med_id IS NULL THEN
+        RAISE_APPLICATION_ERROR(-20004, 'Medicine ID cannot be null');
+    END IF;
+    
+    IF p_quantity IS NULL OR p_quantity <= 0 THEN
+        RAISE_APPLICATION_ERROR(-20003, 'Quantity must be greater than zero');
+    END IF;
+    
+    IF p_batch_number IS NULL OR TRIM(p_batch_number) = '' THEN
+        RAISE_APPLICATION_ERROR(-20004, 'Batch number cannot be empty');
+    END IF;
+    
+    IF p_expiry_date IS NULL THEN
+        RAISE_APPLICATION_ERROR(-20004, 'Expiry date cannot be null');
+    END IF;
+    
+    -- ========================================================================
+    -- VALIDATION 2: Check if medicine exists
+    -- ========================================================================
+    SELECT COUNT(*) INTO v_medicine_exists
+    FROM MEDICINES
+    WHERE med_id = p_med_id;
+    
+    IF v_medicine_exists = 0 THEN
+        RAISE_APPLICATION_ERROR(-20005, 'Medicine ID ' || p_med_id || ' does not exist');
+    END IF;
+    
+    -- Get medicine details
+    v_med_name := get_medicine_name(p_med_id);
+    
+    -- ========================================================================
+    -- VALIDATION 3: Immediate Expiry Safety Check
+    -- ========================================================================
+    v_expiry_status := check_expiry_date(p_expiry_date);
+    v_days_until_expiry := p_expiry_date - SYSDATE;
+    
+    IF v_expiry_status = 'EXPIRED' THEN
+        -- Log the rejection
+        log_alert(
+            p_med_id,
+            'EXPIRED_BATCH_REJECTED',
+            'Batch ' || p_batch_number || ' for ' || v_med_name || 
+            ' rejected: Already expired on ' || TO_CHAR(p_expiry_date, 'DD-MON-YYYY')
+        );
+        
+        RAISE_APPLICATION_ERROR(-20001, 
+            'REJECTED: Medicine batch is already expired. ' ||
+            'Expiry date: ' || TO_CHAR(p_expiry_date, 'DD-MON-YYYY'));
+    
+    ELSIF v_expiry_status = 'NEAR_EXPIRY' THEN
+        -- Log the rejection for near-expiry
+        log_alert(
+            p_med_id,
+            'NEAR_EXPIRY_REJECTED',
+            'Batch ' || p_batch_number || ' for ' || v_med_name || 
+            ' rejected: Expires in ' || ROUND(v_days_until_expiry) || ' days (less than 60 days)'
+        );
+        
+        RAISE_APPLICATION_ERROR(-20002,
+            'REJECTED: Medicine batch expires too soon. ' ||
+            'Expiry date: ' || TO_CHAR(p_expiry_date, 'DD-MON-YYYY') || 
+            ' (in ' || ROUND(v_days_until_expiry) || ' days). ' ||
+            'Minimum required: 60 days');
+    END IF;
+    
+    -- ========================================================================
+    -- INSERT NEW BATCH: If all validations pass
+    -- ========================================================================
+    INSERT INTO BATCH_INVENTORY (
+        batch_id, 
+        med_id, 
+        batch_number, 
+        quantity_in_stock, 
+        expiry_date,
+        entry_date
+    ) VALUES (
+        batch_seq.NEXTVAL,
+        p_med_id,
+        p_batch_number,
+        p_quantity,
+        p_expiry_date,
+        SYSDATE
+    );
+    
+    -- ========================================================================
+    -- UPDATE TOTAL STOCK: Update master inventory
+    -- ========================================================================
+    UPDATE MEDICINES
+    SET total_quantity = total_quantity + p_quantity
+    WHERE med_id = p_med_id
+    RETURNING total_quantity, reorder_level INTO v_current_total, v_reorder_level;
+    
+    -- ========================================================================
+    -- REORDER LEVEL CHECK: Check if stock needs reordering
+    -- ========================================================================
+    IF v_current_total <= v_reorder_level THEN
+        log_alert(
+            p_med_id,
+            'LOW_STOCK',
+            'Stock level for ' || v_med_name || ' is at ' || v_current_total || 
+            ' units (reorder level: ' || v_reorder_level || '). Please reorder.'
+        );
+    END IF;
+    
+    -- ========================================================================
+    -- LOG SUCCESS: Record successful entry
+    -- ========================================================================
+    log_alert(
+        p_med_id,
+        'BATCH_ADDED',
+        'Successfully added batch ' || p_batch_number || ' for ' || v_med_name || 
+        '. Quantity: ' || p_quantity || ', New total: ' || v_current_total
+    );
+    
+    -- Set success status
+    p_status := 'SUCCESS';
+    p_message := 'Batch ' || p_batch_number || ' successfully added. ' ||
+                 'New total stock for ' || v_med_name || ': ' || v_current_total || ' units.';
+    
+    COMMIT;
+    
+    -- Display success message
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('SUCCESS: Batch Entry Completed');
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('Medicine: ' || v_med_name);
+    DBMS_OUTPUT.PUT_LINE('Batch Number: ' || p_batch_number);
+    DBMS_OUTPUT.PUT_LINE('Quantity Added: ' || p_quantity);
+    DBMS_OUTPUT.PUT_LINE('New Total Stock: ' || v_current_total);
+    DBMS_OUTPUT.PUT_LINE('Expiry Date: ' || TO_CHAR(p_expiry_date, 'DD-MON-YYYY'));
+    DBMS_OUTPUT.PUT_LINE('Days Until Expiry: ' || ROUND(v_days_until_expiry));
+    DBMS_OUTPUT.PUT_LINE('========================================');
+
+EXCEPTION
+    WHEN DUP_VAL_ON_INDEX THEN
+        ROLLBACK;
+        p_status := 'ERROR';
+        p_message := 'Batch number ' || p_batch_number || ' already exists';
+        RAISE_APPLICATION_ERROR(-20006, p_message);
+    
+    WHEN OTHERS THEN
+        ROLLBACK;
+        p_status := 'ERROR';
+        p_message := 'Error: ' || SQLERRM;
+        RAISE;
+END ADD_NEW_MEDICINE_BATCH;
+/
+
+-- ============================================================================
+-- STEP 6: CREATE TRIGGER FOR AUTOMATIC LOW STOCK ALERTS
+-- ============================================================================
+
+CREATE OR REPLACE TRIGGER trg_check_reorder_level
+AFTER UPDATE OF total_quantity ON MEDICINES
+FOR EACH ROW
+WHEN (NEW.total_quantity <= NEW.reorder_level)
+BEGIN
+    -- This trigger automatically fires when stock reaches reorder level
+    -- Additional logging can be added here if needed
+    DBMS_OUTPUT.PUT_LINE('WARNING: ' || :NEW.med_name || 
+                        ' has reached reorder level. Current stock: ' || 
+                        :NEW.total_quantity);
+END;
+/
+
+-- ============================================================================
+-- STEP 7: CREATE HELPER PROCEDURES FOR REPORTING
+-- ============================================================================
+
+-- Procedure to view all batches for a medicine
+CREATE OR REPLACE PROCEDURE view_medicine_batches(
+    p_med_id IN NUMBER
+) IS
+    CURSOR batch_cursor IS
+        SELECT b.batch_number, b.quantity_in_stock, b.expiry_date, b.entry_date,
+               m.med_name
+        FROM BATCH_INVENTORY b
+        JOIN MEDICINES m ON b.med_id = m.med_id
+        WHERE b.med_id = p_med_id
+        ORDER BY b.expiry_date;
+    
+    v_med_name VARCHAR2(100);
+BEGIN
+    v_med_name := get_medicine_name(p_med_id);
+    
+    IF v_med_name IS NULL THEN
+        DBMS_OUTPUT.PUT_LINE('Medicine not found.');
+        RETURN;
+    END IF;
+    
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('BATCHES FOR: ' || v_med_name);
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    
+    FOR batch_rec IN batch_cursor LOOP
+        DBMS_OUTPUT.PUT_LINE('Batch: ' || batch_rec.batch_number);
+        DBMS_OUTPUT.PUT_LINE('  Quantity: ' || batch_rec.quantity_in_stock);
+        DBMS_OUTPUT.PUT_LINE('  Expiry: ' || TO_CHAR(batch_rec.expiry_date, 'DD-MON-YYYY'));
+        DBMS_OUTPUT.PUT_LINE('  Entry Date: ' || TO_CHAR(batch_rec.entry_date, 'DD-MON-YYYY'));
+        DBMS_OUTPUT.PUT_LINE('  Status: ' || check_expiry_date(batch_rec.expiry_date));
+        DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+    END LOOP;
+END view_medicine_batches;
+/
+
+-- Procedure to view recent alerts
+CREATE OR REPLACE PROCEDURE view_recent_alerts(
+    p_days IN NUMBER DEFAULT 7
+) IS
+    CURSOR alert_cursor IS
+        SELECT a.alert_type, a.message, a.alert_date, m.med_name
+        FROM ALERTS_LOG a
+        LEFT JOIN MEDICINES m ON a.med_id = m.med_id
+        WHERE a.alert_date >= SYSDATE - p_days
+        ORDER BY a.alert_date DESC;
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('ALERTS FROM LAST ' || p_days || ' DAYS');
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    
+    FOR alert_rec IN alert_cursor LOOP
+        DBMS_OUTPUT.PUT_LINE('Date: ' || TO_CHAR(alert_rec.alert_date, 'DD-MON-YYYY HH24:MI'));
+        DBMS_OUTPUT.PUT_LINE('Type: ' || alert_rec.alert_type);
+        DBMS_OUTPUT.PUT_LINE('Medicine: ' || NVL(alert_rec.med_name, 'N/A'));
+        DBMS_OUTPUT.PUT_LINE('Message: ' || alert_rec.message);
+        DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+    END LOOP;
+END view_recent_alerts;
+/
+
+-- ============================================================================
+-- STEP 8: INSERT SAMPLE DATA FOR TESTING
+-- ============================================================================
+
+-- Insert sample medicines
+INSERT INTO MEDICINES (med_id, med_name, dosage, reorder_level, total_quantity)
+VALUES (med_seq.NEXTVAL, 'Paracetamol', '500mg', 200, 0);
+
+INSERT INTO MEDICINES (med_id, med_name, dosage, reorder_level, total_quantity)
+VALUES (med_seq.NEXTVAL, 'Amoxicillin', '250mg', 150, 0);
+
+INSERT INTO MEDICINES (med_id, med_name, dosage, reorder_level, total_quantity)
+VALUES (med_seq.NEXTVAL, 'Ibuprofen', '400mg', 100, 0);
+
+INSERT INTO MEDICINES (med_id, med_name, dosage, reorder_level, total_quantity)
+VALUES (med_seq.NEXTVAL, 'Metformin', '850mg', 120, 0);
+
+COMMIT;
+
+-- ============================================================================
+-- STEP 9: TEST CASES AND USAGE EXAMPLES
+-- ============================================================================
+
+-- Enable output to see results
+SET SERVEROUTPUT ON;
+
+-- Display instructions
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('Med-Enter System Installed Successfully!');
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('USAGE EXAMPLES:');
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('1. Add a valid batch:');
+    DBMS_OUTPUT.PUT_LINE('   DECLARE');
+    DBMS_OUTPUT.PUT_LINE('     v_status VARCHAR2(50);');
+    DBMS_OUTPUT.PUT_LINE('     v_message VARCHAR2(500);');
+    DBMS_OUTPUT.PUT_LINE('   BEGIN');
+    DBMS_OUTPUT.PUT_LINE('     ADD_NEW_MEDICINE_BATCH(');
+    DBMS_OUTPUT.PUT_LINE('       p_med_id => 1,');
+    DBMS_OUTPUT.PUT_LINE('       p_quantity => 500,');
+    DBMS_OUTPUT.PUT_LINE('       p_batch_number => ''BATCH001'',');
+    DBMS_OUTPUT.PUT_LINE('       p_expiry_date => ADD_MONTHS(SYSDATE, 12),');
+    DBMS_OUTPUT.PUT_LINE('       p_status => v_status,');
+    DBMS_OUTPUT.PUT_LINE('       p_message => v_message');
+    DBMS_OUTPUT.PUT_LINE('     );');
+    DBMS_OUTPUT.PUT_LINE('   END;');
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('2. View batches: view_medicine_batches(1);');
+    DBMS_OUTPUT.PUT_LINE('3. View alerts: view_recent_alerts(7);');
+    DBMS_OUTPUT.PUT_LINE('========================================');
+END;
+/
